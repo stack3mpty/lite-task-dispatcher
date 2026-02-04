@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.lite.task</groupId>
+        <artifactId>lite-task-dispatcher</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>task-dispatcher-core</artifactId>
+    <packaging>jar</packaging>
+    <name>task-dispatcher-core</name>
+    <description>Core business module - producer, dispatcher, executor</description>
+
+    <dependencies>
+        <!-- Internal Modules -->
+        <dependency>
+            <groupId>com.lite.task</groupId>
+            <artifactId>task-dispatcher-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lite.task</groupId>
+            <artifactId>task-dispatcher-domain</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lite.task</groupId>
+            <artifactId>task-dispatcher-infrastructure</artifactId>
+        </dependency>
+
+        <!-- Spring Boot -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- HTTP Client for callbacks -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+    </dependencies>
+</project>

@@ -1,0 +1,99 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: lite-task-dispatcher
+
+  # PostgreSQL Configuration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/task_dispatcher
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 30000
+      pool-name: TaskDispatcherHikariCP
+      max-lifetime: 1800000
+      connection-timeout: 30000
+
+  # JPA Configuration
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+  # Redis Configuration
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+      database: 0
+      timeout: 10000
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
+          min-idle: 5
+          max-wait: 3000
+
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: task-dispatcher-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    producer:
+      acks: all
+      retries: 3
+
+# Redisson Configuration
+redisson:
+  single-server-config:
+    address: "redis://localhost:6379"
+    connection-minimum-idle-size: 5
+    connection-pool-size: 20
+
+# Task Dispatcher Configuration
+task:
+  dispatcher:
+    executor-id: ${HOSTNAME:localhost}
+    poll-interval-ms: 1000
+    batch-size: 10
+
+# Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    com.lite.task: DEBUG
+    org.springframework.kafka: WARN
+    org.apache.kafka: WARN
+
+# SpringDoc OpenAPI Configuration
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
