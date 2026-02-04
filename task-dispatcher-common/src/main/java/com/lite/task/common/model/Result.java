@@ -44,11 +44,11 @@ public class Result<T> implements Serializable {
      */
     private String traceId;
 
-    private Result() {
+    protected Result() {
         this.timestamp = LocalDateTime.now();
     }
 
-    private Result(int code, String message, T data) {
+    protected Result(int code, String message, T data) {
         this.code = code;
         this.message = message;
         this.data = data;
