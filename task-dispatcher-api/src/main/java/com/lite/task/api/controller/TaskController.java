@@ -7,6 +7,7 @@ import com.lite.task.common.model.Result;
 import com.lite.task.core.producer.TaskProducer;
 import com.lite.task.domain.task.entity.TaskInstance;
 import com.lite.task.infrastructure.persistence.repository.TaskInstanceRepository;
+import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -33,6 +34,7 @@ public class TaskController {
 
     private final TaskProducer taskProducer;
     private final TaskInstanceRepository taskInstanceRepository;
+    private final TaskCacheOperator taskCacheOperator;
 
     /**
      * Submit a new task
@@ -56,12 +58,18 @@ public class TaskController {
 
     /**
      * Get task by ID
+     * Priority: Redis (active tasks) -> DB (historical tasks)
      */
     @GetMapping("/{taskId}")
     @Operation(summary = "Get task by ID")
     public Result<TaskResponse> getById(@PathVariable String taskId) {
-        TaskInstance task = taskInstanceRepository.findByTaskId(taskId)
-                .orElse(null);
+        // Try Redis first (primary storage for active tasks)
+        TaskInstance task = taskCacheOperator.get(taskId);
+
+        // Fallback to DB for historical tasks
+        if (task == null) {
+            task = taskInstanceRepository.findByTaskId(taskId).orElse(null);
+        }
 
         if (task == null) {
             return Result.failure(10001, "Task not found: " + taskId);
@@ -111,14 +119,20 @@ public class TaskController {
 
     /**
      * Retry a failed task
+     * Priority: Redis (active tasks) -> DB (historical tasks)
      */
     @PutMapping("/{taskId}/retry")
     @Operation(summary = "Retry a failed task")
     public Result<TaskResponse> retry(@PathVariable String taskId) {
         log.info("Retrying task: {}", taskId);
 
-        TaskInstance task = taskInstanceRepository.findByTaskId(taskId)
-                .orElse(null);
+        // Try Redis first (primary storage)
+        TaskInstance task = taskCacheOperator.get(taskId);
+
+        // Fallback to DB for historical tasks
+        if (task == null) {
+            task = taskInstanceRepository.findByTaskId(taskId).orElse(null);
+        }
 
         if (task == null) {
             return Result.failure(10001, "Task not found: " + taskId);
@@ -130,6 +144,11 @@ public class TaskController {
 
         // Schedule retry
         task.scheduleRetry();
+
+        // Update Redis (primary storage)
+        taskCacheOperator.save(task);
+
+        // Async persist to DB
         taskInstanceRepository.save(task);
 
         return Result.success(toResponse(task));

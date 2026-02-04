@@ -1,13 +1,16 @@
 package com.lite.task.domain.task.entity;
 
+import io.hypersistence.utils.hibernate.type.json.JsonType;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.Type;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
+import java.util.Map;
 
 /**
  * Task Execution Log Entity
@@ -68,6 +71,13 @@ public class TaskExecutionLog implements Serializable {
      */
     @Column(name = "error_detail", columnDefinition = "text")
     private String errorDetail;
+
+    /**
+     * Execution result (JSON) - stored here since Redis doesn't store result
+     */
+    @Type(JsonType.class)
+    @Column(name = "result", columnDefinition = "jsonb")
+    private Map<String, Object> result;
 
     /**
      * Execution duration in milliseconds

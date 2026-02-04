@@ -15,11 +15,12 @@ import com.lite.task.infrastructure.persistence.repository.TaskInstanceRepositor
 import com.lite.task.infrastructure.redis.DeduplicationChecker;
 import com.lite.task.infrastructure.redis.DelayQueueOperator;
 import com.lite.task.infrastructure.redis.RateLimiter;
+import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import com.lite.task.infrastructure.redis.TaskQueueOperator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -41,6 +42,7 @@ public class TaskProducer {
     private final TaskInstanceRepository taskInstanceRepository;
     private final TaskQueueOperator taskQueueOperator;
     private final DelayQueueOperator delayQueueOperator;
+    private final TaskCacheOperator taskCacheOperator;
     private final RateLimiter rateLimiter;
     private final DeduplicationChecker deduplicationChecker;
     private final TaskEventProducer eventProducer;
@@ -56,7 +58,6 @@ public class TaskProducer {
      * @param createdBy   Creator identifier
      * @return Created task instance
      */
-    @Transactional
     public TaskInstance submit(String taskType, Map<String, Object> params,
                                int priority, LocalDateTime executeAt,
                                String callbackUrl, String createdBy) {
@@ -85,27 +86,27 @@ public class TaskProducer {
         // 4. Create task instance
         String taskId = IdGenerator.generateIdStr();
         TaskPriority taskPriority = TaskPriority.fromLevel(priority);
+        LocalDateTime now = LocalDateTime.now();
 
         TaskInstance task = TaskInstance.builder()
                 .taskId(taskId)
                 .taskDefId(definition.getId())
                 .taskType(taskType)
-                .status(TaskStatus.CREATED)
+                .status(TaskStatus.PENDING)
                 .priority(priority)
                 .params(params)
                 .maxRetry(definition.getMaxRetryAttempts())
-                .executeAt(executeAt != null ? executeAt : LocalDateTime.now())
+                .executeAt(executeAt != null ? executeAt : now)
                 .callbackUrl(callbackUrl)
                 .createdBy(createdBy)
+                .createdAt(now)
+                .updatedAt(now)
                 .build();
 
-        // 5. Save to database
-        task = taskInstanceRepository.save(task);
+        // 5. Save to Redis Hash (primary storage)
+        taskCacheOperator.save(task);
 
         // 6. Submit to queue or delay queue
-        task.submit(); // Change status to PENDING
-        taskInstanceRepository.save(task);
-
         if (executeAt != null && executeAt.isAfter(LocalDateTime.now())) {
             // Delayed task - add to delay queue
             delayQueueOperator.add(taskId, executeAt);
@@ -116,7 +117,10 @@ public class TaskProducer {
             log.info("Task submitted to queue: taskId={}, priority={}", taskId, taskPriority);
         }
 
-        // 7. Publish event
+        // 7. Async persist to database (for record keeping)
+        asyncPersistTask(task);
+
+        // 8. Publish event
         TaskCreatedEvent event = new TaskCreatedEvent(taskId, taskType, priority, params, createdBy);
         eventProducer.publishTaskCreated(event);
 
@@ -126,7 +130,6 @@ public class TaskProducer {
     /**
      * Submit task with default priority
      */
-    @Transactional
     public TaskInstance submit(String taskType, Map<String, Object> params) {
         return submit(taskType, params, TaskPriority.DEFAULT.getLevel(), null, null, null);
     }
@@ -134,7 +137,6 @@ public class TaskProducer {
     /**
      * Submit task with priority
      */
-    @Transactional
     public TaskInstance submit(String taskType, Map<String, Object> params, int priority) {
         return submit(taskType, params, priority, null, null, null);
     }
@@ -142,7 +144,6 @@ public class TaskProducer {
     /**
      * Submit delayed task
      */
-    @Transactional
     public TaskInstance submitDelayed(String taskType, Map<String, Object> params,
                                       Duration delay, String createdBy) {
         LocalDateTime executeAt = LocalDateTime.now().plus(delay);
@@ -152,7 +153,6 @@ public class TaskProducer {
     /**
      * Submit task with callback
      */
-    @Transactional
     public TaskInstance submitWithCallback(String taskType, Map<String, Object> params,
                                            String callbackUrl, String createdBy) {
         return submit(taskType, params, TaskPriority.DEFAULT.getLevel(), null, callbackUrl, createdBy);
@@ -161,10 +161,15 @@ public class TaskProducer {
     /**
      * Cancel a pending task
      */
-    @Transactional
     public boolean cancel(String taskId) {
-        TaskInstance task = taskInstanceRepository.findByTaskId(taskId)
-                .orElseThrow(() -> TaskException.notFound(taskId));
+        // Get task from Redis (primary storage)
+        TaskInstance task = taskCacheOperator.get(taskId);
+
+        // Fallback to database if not in Redis
+        if (task == null) {
+            task = taskInstanceRepository.findByTaskId(taskId)
+                    .orElseThrow(() -> TaskException.notFound(taskId));
+        }
 
         if (!task.getStatus().isCancellable()) {
             throw TaskException.invalidStatus(taskId, task.getStatus().getCode(), "PENDING or CREATED");
@@ -179,9 +184,12 @@ public class TaskProducer {
             removed = delayQueueOperator.remove(taskId);
         }
 
-        // Update status
+        // Update Redis status
+        taskCacheOperator.updateStatus(taskId, TaskStatus.CANCELLED);
+
+        // Async update database
         task.cancel();
-        taskInstanceRepository.save(task);
+        asyncPersistTask(task);
 
         // Remove deduplication mark so task can be resubmitted
         if (task.getParams() != null) {
@@ -190,5 +198,21 @@ public class TaskProducer {
 
         log.info("Task cancelled: taskId={}", taskId);
         return true;
+    }
+
+    /**
+     * Async persist task to database (for record keeping)
+     * DB write failure does NOT affect task execution
+     */
+    @Async
+    public void asyncPersistTask(TaskInstance task) {
+        try {
+            taskInstanceRepository.save(task);
+            log.debug("Task persisted to database: taskId={}", task.getTaskId());
+        } catch (Exception e) {
+            log.error("Failed to persist task to database (non-blocking): taskId={}, error={}",
+                    task.getTaskId(), e.getMessage());
+            // DB write failure is non-blocking, task continues in Redis
+        }
     }
 }

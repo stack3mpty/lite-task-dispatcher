@@ -21,13 +21,13 @@ import com.lite.task.infrastructure.persistence.repository.TaskExecutionLogRepos
 import com.lite.task.infrastructure.persistence.repository.TaskInstanceRepository;
 import com.lite.task.infrastructure.redis.DelayQueueOperator;
 import com.lite.task.infrastructure.redis.DistributedLock;
+import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import com.lite.task.infrastructure.redis.TaskQueueOperator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.net.InetAddress;
 import java.util.List;
@@ -51,6 +51,7 @@ public class TaskDispatcher {
     private final TaskExecutionLogRepository executionLogRepository;
     private final TaskQueueOperator taskQueueOperator;
     private final DelayQueueOperator delayQueueOperator;
+    private final TaskCacheOperator taskCacheOperator;
     private final DistributedLock distributedLock;
     private final TaskEventProducer eventProducer;
     private final List<TaskExecutor> executors;
@@ -112,7 +113,6 @@ public class TaskDispatcher {
      * Execute a specific task
      */
     @Async("taskExecutor")
-    @Transactional
     public boolean executeTask(String taskId) {
         // Acquire distributed lock to prevent duplicate execution
         String lockKey = "execute:" + taskId;
@@ -122,12 +122,11 @@ public class TaskDispatcher {
         }
 
         try {
-            // Load task
-            TaskInstance task = taskInstanceRepository.findByTaskId(taskId)
-                    .orElse(null);
+            // Load task from Redis Hash (primary storage)
+            TaskInstance task = taskCacheOperator.get(taskId);
 
             if (task == null) {
-                log.warn("Task not found: {}", taskId);
+                log.warn("Task not found in cache: {}", taskId);
                 return false;
             }
 
@@ -161,11 +160,10 @@ public class TaskDispatcher {
                     .callbackUrl(task.getCallbackUrl())
                     .build();
 
-            // Start task
-            task.start(executorId);
-            taskInstanceRepository.save(task);
+            // Update Redis status to RUNNING
+            taskCacheOperator.updateOnStart(taskId, executorId);
 
-            // Mark as running in Redis
+            // Mark as running in Redis (for timeout tracking)
             taskQueueOperator.markRunning(taskId, executorId, definition.getTimeoutSeconds());
 
             // Publish started event
@@ -200,13 +198,18 @@ public class TaskDispatcher {
      * Handle successful execution
      */
     private void handleSuccess(TaskInstance task, TaskResult result, long duration, int attemptNumber) {
-        task.complete(result.getData());
-        taskInstanceRepository.save(task);
+        // Update Redis status (primary storage)
+        taskCacheOperator.updateOnComplete(task.getTaskId());
 
-        // Save execution log
+        // Save execution log to DB (result is stored here, not in Redis)
         TaskExecutionLog logEntry = TaskExecutionLog.success(
                 task, attemptNumber, duration, executorIp, executorId);
-        executionLogRepository.save(logEntry);
+        logEntry.setResult(result.getData()); // Store result in execution log
+        asyncPersistExecutionLog(logEntry);
+
+        // Async update task instance in DB (for record keeping)
+        task.complete(result.getData());
+        asyncPersistTask(task);
 
         // Publish event
         eventProducer.publishTaskCompleted(new TaskCompletedEvent(
@@ -223,11 +226,11 @@ public class TaskDispatcher {
                                TaskResult result, long duration, int attemptNumber) {
         task.fail(result.getMessage());
 
-        // Save execution log
+        // Save execution log to DB
         TaskExecutionLog logEntry = TaskExecutionLog.failure(
                 task, attemptNumber, result.getMessage(), result.getErrorDetail(),
                 duration, executorIp, executorId);
-        executionLogRepository.save(logEntry);
+        asyncPersistExecutionLog(logEntry);
 
         // Check if should retry
         boolean willRetry = false;
@@ -243,14 +246,24 @@ public class TaskDispatcher {
                 );
                 long delay = retryPolicy.getNextDelay(task.getRetryCount());
 
+                // Update Redis for retry
+                taskCacheOperator.updateRetry(task.getTaskId(), task.getRetryCount(), TaskStatus.RETRYING);
+
                 // Add to delay queue for retry
                 delayQueueOperator.addWithDelay(task.getTaskId(), delay);
                 log.info("Task scheduled for retry: taskId={}, attempt={}, delay={}ms",
                         task.getTaskId(), task.getRetryCount(), delay);
+            } else {
+                // Max retries exceeded, mark as DEAD
+                taskCacheOperator.updateOnFailure(task.getTaskId(), result.getMessage(), TaskStatus.DEAD);
             }
+        } else {
+            // Non-retryable failure
+            taskCacheOperator.updateOnFailure(task.getTaskId(), result.getMessage(), TaskStatus.FAILED);
         }
 
-        taskInstanceRepository.save(task);
+        // Async update task instance in DB
+        asyncPersistTask(task);
 
         // Publish event
         TaskFailedEvent event = willRetry ?
@@ -273,13 +286,38 @@ public class TaskDispatcher {
      */
     private void handleExecutionError(String taskId, Exception e) {
         try {
-            TaskInstance task = taskInstanceRepository.findByTaskId(taskId).orElse(null);
-            if (task != null && task.getStatus() == TaskStatus.RUNNING) {
-                task.fail(e.getMessage());
-                taskInstanceRepository.save(task);
-            }
+            // Update Redis status
+            taskCacheOperator.updateOnFailure(taskId, e.getMessage(), TaskStatus.FAILED);
         } catch (Exception ex) {
             log.error("Error handling execution error: taskId={}, error={}", taskId, ex.getMessage());
+        }
+    }
+
+    /**
+     * Async persist task to database (for record keeping)
+     */
+    @Async
+    public void asyncPersistTask(TaskInstance task) {
+        try {
+            taskInstanceRepository.save(task);
+            log.debug("Task persisted to database: taskId={}", task.getTaskId());
+        } catch (Exception e) {
+            log.error("Failed to persist task to database (non-blocking): taskId={}, error={}",
+                    task.getTaskId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Async persist execution log to database
+     */
+    @Async
+    public void asyncPersistExecutionLog(TaskExecutionLog logEntry) {
+        try {
+            executionLogRepository.save(logEntry);
+            log.debug("Execution log persisted: taskId={}", logEntry.getTaskId());
+        } catch (Exception e) {
+            log.error("Failed to persist execution log (non-blocking): taskId={}, error={}",
+                    logEntry.getTaskId(), e.getMessage());
         }
     }
 
