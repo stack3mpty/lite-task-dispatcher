@@ -116,8 +116,8 @@ public class TaskDispatcher {
     public boolean executeTask(String taskId) {
         // Acquire distributed lock to prevent duplicate execution
         String lockKey = "execute:" + taskId;
-        if (!distributedLock.tryLockTask(taskId, 300)) {
-            log.warn("Failed to acquire lock for task: {}", taskId);
+        if (!distributedLock.tryLockTask(lockKey, 300)) {
+            log.warn("Failed to acquire lock for task: {}", lockKey);
             return false;
         }
 
@@ -189,7 +189,7 @@ public class TaskDispatcher {
             handleExecutionError(taskId, e);
             return false;
         } finally {
-            distributedLock.unlockTask(taskId);
+            distributedLock.unlockTask(lockKey);
             taskQueueOperator.clearRunning(taskId);
         }
     }

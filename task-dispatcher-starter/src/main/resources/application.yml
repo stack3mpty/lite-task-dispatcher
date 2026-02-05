@@ -34,7 +34,7 @@ spring:
   # Redis Configuration
   data:
     redis:
-      host: localhost
+      host: 127.0.0.1
       port: 6379
       password:
       database: 0
@@ -57,12 +57,7 @@ spring:
       acks: all
       retries: 3
 
-# Redisson Configuration
-redisson:
-  single-server-config:
-    address: "redis://localhost:6379"
-    connection-minimum-idle-size: 5
-    connection-pool-size: 20
+# Redisson Configuration (see RedissonConfig.java)
 
 # Task Dispatcher Configuration
 task:
