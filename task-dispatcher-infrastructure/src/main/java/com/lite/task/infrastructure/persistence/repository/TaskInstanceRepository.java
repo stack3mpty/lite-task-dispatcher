@@ -55,6 +55,11 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, Long
     List<TaskInstance> findByTaskTypeAndStatus(String taskType, TaskStatus status);
 
     /**
+     * Find by task type and status with pagination
+     */
+    Page<TaskInstance> findByTaskTypeAndStatus(String taskType, TaskStatus status, Pageable pageable);
+
+    /**
      * Find pending tasks ready for execution
      */
     @Query("SELECT t FROM TaskInstance t WHERE t.status = 'PENDING' AND t.executeAt <= :now ORDER BY t.priority ASC, t.createdAt ASC")

@@ -2,6 +2,7 @@ package com.lite.task.api.controller;
 
 import com.lite.task.api.dto.request.TaskSubmitRequest;
 import com.lite.task.api.dto.response.TaskResponse;
+import com.lite.task.common.enums.TaskStatus;
 import com.lite.task.common.model.PageResult;
 import com.lite.task.common.model.Result;
 import com.lite.task.core.producer.TaskProducer;
@@ -91,9 +92,22 @@ public class TaskController {
 
         PageRequest pageRequest = PageRequest.of(page - 1, size, Sort.by(Sort.Direction.DESC, "createdAt"));
 
+        TaskStatus taskStatus = null;
+        if (status != null && !status.isEmpty()) {
+            try {
+                taskStatus = TaskStatus.fromCode(status);
+            } catch (IllegalArgumentException e) {
+                log.warn("Invalid status filter: {}", status);
+            }
+        }
+
         Page<TaskInstance> taskPage;
-        if (taskType != null && !taskType.isEmpty()) {
+        if (taskType != null && !taskType.isEmpty() && taskStatus != null) {
+            taskPage = taskInstanceRepository.findByTaskTypeAndStatus(taskType, taskStatus, pageRequest);
+        } else if (taskType != null && !taskType.isEmpty()) {
             taskPage = taskInstanceRepository.findByTaskType(taskType, pageRequest);
+        } else if (taskStatus != null) {
+            taskPage = taskInstanceRepository.findByStatus(taskStatus, pageRequest);
         } else {
             taskPage = taskInstanceRepository.findAll(pageRequest);
         }
