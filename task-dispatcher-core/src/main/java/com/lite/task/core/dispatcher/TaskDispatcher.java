@@ -30,6 +30,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.net.InetAddress;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -163,6 +164,9 @@ public class TaskDispatcher {
             // Update Redis status to RUNNING
             taskCacheOperator.updateOnStart(taskId, executorId);
 
+            // Keep domain object state in sync with cache state transition
+            task.start(executorId);
+
             // Mark as running in Redis (for timeout tracking)
             taskQueueOperator.markRunning(taskId, executorId, definition.getTimeoutSeconds());
 
@@ -198,17 +202,27 @@ public class TaskDispatcher {
      * Handle successful execution
      */
     private void handleSuccess(TaskInstance task, TaskResult result, long duration, int attemptNumber) {
+        Map<String, Object> resultData = result.getData();
+
+        task.complete(resultData);
+
         // Update Redis status (primary storage)
         taskCacheOperator.updateOnComplete(task.getTaskId());
 
+        // Ensure DB identity for consistent task status update and execution log
+        ensureTaskIdentity(task);
+
         // Save execution log to DB (result is stored here, not in Redis)
-        TaskExecutionLog logEntry = TaskExecutionLog.success(
-                task, attemptNumber, duration, executorIp, executorId);
-        logEntry.setResult(result.getData()); // Store result in execution log
-        asyncPersistExecutionLog(logEntry);
+        if (task.getId() != null) {
+            TaskExecutionLog logEntry = TaskExecutionLog.success(
+                    task, attemptNumber, duration, executorIp, executorId);
+            logEntry.setResult(resultData); // Store result in execution log
+            asyncPersistExecutionLog(logEntry);
+        } else {
+            log.warn("Skip execution log persistence because task identity is missing: taskId={}", task.getTaskId());
+        }
 
         // Async update task instance in DB (for record keeping)
-        task.complete(result.getData());
         asyncPersistTask(task);
 
         // Publish event
@@ -226,11 +240,18 @@ public class TaskDispatcher {
                                TaskResult result, long duration, int attemptNumber) {
         task.fail(result.getMessage());
 
+        // Ensure DB identity for consistent task status update and execution log
+        ensureTaskIdentity(task);
+
         // Save execution log to DB
-        TaskExecutionLog logEntry = TaskExecutionLog.failure(
-                task, attemptNumber, result.getMessage(), result.getErrorDetail(),
-                duration, executorIp, executorId);
-        asyncPersistExecutionLog(logEntry);
+        if (task.getId() != null) {
+            TaskExecutionLog logEntry = TaskExecutionLog.failure(
+                    task, attemptNumber, result.getMessage(), result.getErrorDetail(),
+                    duration, executorIp, executorId);
+            asyncPersistExecutionLog(logEntry);
+        } else {
+            log.warn("Skip execution log persistence because task identity is missing: taskId={}", task.getTaskId());
+        }
 
         // Check if should retry
         boolean willRetry = false;
@@ -285,11 +306,45 @@ public class TaskDispatcher {
      * Handle execution error
      */
     private void handleExecutionError(String taskId, Exception e) {
+        String errorMessage = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+
         try {
             // Update Redis status
-            taskCacheOperator.updateOnFailure(taskId, e.getMessage(), TaskStatus.FAILED);
+            taskCacheOperator.updateOnFailure(taskId, errorMessage, TaskStatus.FAILED);
         } catch (Exception ex) {
             log.error("Error handling execution error: taskId={}, error={}", taskId, ex.getMessage());
+        }
+
+        try {
+            TaskInstance task = taskCacheOperator.get(taskId);
+            if (task == null) {
+                return;
+            }
+
+            if (!task.getStatus().isTerminal()) {
+                task.setStatus(TaskStatus.FAILED);
+                task.setErrorMessage(errorMessage);
+                task.setFinishedAt(LocalDateTime.now());
+                task.setUpdatedAt(LocalDateTime.now());
+            }
+
+            ensureTaskIdentity(task);
+            asyncPersistTask(task);
+
+            if (task.getId() != null) {
+                TaskExecutionLog logEntry = TaskExecutionLog.failure(
+                        task,
+                        task.getRetryCount() + 1,
+                        errorMessage,
+                        e.toString(),
+                        0L,
+                        executorIp,
+                        executorId
+                );
+                asyncPersistExecutionLog(logEntry);
+            }
+        } catch (Exception ex) {
+            log.error("Failed to sync execution error to DB: taskId={}, error={}", taskId, ex.getMessage(), ex);
         }
     }
 
@@ -299,7 +354,25 @@ public class TaskDispatcher {
     @Async
     public void asyncPersistTask(TaskInstance task) {
         try {
-            taskInstanceRepository.save(task);
+            if (task.getId() == null) {
+                taskInstanceRepository.findByTaskId(task.getTaskId()).ifPresent(existing -> task.setId(existing.getId()));
+            }
+
+            if (task.getId() == null) {
+                taskInstanceRepository.save(task);
+            } else {
+                taskInstanceRepository.findById(task.getId()).ifPresentOrElse(existing -> {
+                    existing.setStatus(task.getStatus());
+                    existing.setResult(task.getResult());
+                    existing.setErrorMessage(task.getErrorMessage());
+                    existing.setRetryCount(task.getRetryCount());
+                    existing.setStartedAt(task.getStartedAt());
+                    existing.setFinishedAt(task.getFinishedAt());
+                    existing.setExecutorId(task.getExecutorId());
+                    existing.setUpdatedAt(LocalDateTime.now());
+                    taskInstanceRepository.save(existing);
+                }, () -> taskInstanceRepository.save(task));
+            }
             log.debug("Task persisted to database: taskId={}", task.getTaskId());
         } catch (Exception e) {
             log.error("Failed to persist task to database (non-blocking): taskId={}, error={}",
@@ -333,5 +406,13 @@ public class TaskDispatcher {
      */
     public boolean hasExecutor(String executorType) {
         return executorMap.containsKey(executorType.toUpperCase());
+    }
+
+    private void ensureTaskIdentity(TaskInstance task) {
+        if (task.getId() != null) {
+            return;
+        }
+
+        taskInstanceRepository.findByTaskId(task.getTaskId()).ifPresent(existing -> task.setId(existing.getId()));
     }
 }

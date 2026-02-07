@@ -2,6 +2,7 @@ package com.lite.task.api.controller;
 
 import com.lite.task.api.dto.request.TaskSubmitRequest;
 import com.lite.task.api.dto.response.TaskResponse;
+import com.lite.task.common.enums.TaskPriority;
 import com.lite.task.common.enums.TaskStatus;
 import com.lite.task.common.model.PageResult;
 import com.lite.task.common.model.Result;
@@ -9,6 +10,7 @@ import com.lite.task.core.producer.TaskProducer;
 import com.lite.task.domain.task.entity.TaskInstance;
 import com.lite.task.infrastructure.persistence.repository.TaskInstanceRepository;
 import com.lite.task.infrastructure.redis.TaskCacheOperator;
+import com.lite.task.infrastructure.redis.TaskQueueOperator;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -36,6 +38,7 @@ public class TaskController {
     private final TaskProducer taskProducer;
     private final TaskInstanceRepository taskInstanceRepository;
     private final TaskCacheOperator taskCacheOperator;
+    private final TaskQueueOperator taskQueueOperator;
 
     /**
      * Submit a new task
@@ -159,10 +162,12 @@ public class TaskController {
         // Schedule retry
         task.scheduleRetry();
 
-        // Update Redis (primary storage)
-        taskCacheOperator.save(task);
+        // Update Redis (primary storage) and enqueue for execution
+        taskCacheOperator.updateRetry(taskId, task.getRetryCount(), TaskStatus.RETRYING);
+        TaskPriority priority = task.getPriorityEnum() != null ? task.getPriorityEnum() : TaskPriority.DEFAULT;
+        taskQueueOperator.push(taskId, priority);
 
-        // Async persist to DB
+        // Persist to DB
         taskInstanceRepository.save(task);
 
         return Result.success(toResponse(task));

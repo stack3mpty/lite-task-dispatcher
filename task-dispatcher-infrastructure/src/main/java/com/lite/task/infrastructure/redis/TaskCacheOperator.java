@@ -253,6 +253,7 @@ public class TaskCacheOperator {
     private Map<String, String> taskToHash(TaskInstance task) {
         Map<String, String> hash = new HashMap<>();
 
+        hash.put("id", task.getId() != null ? String.valueOf(task.getId()) : "");
         hash.put("taskId", task.getTaskId());
         hash.put("taskDefId", task.getTaskDefId() != null ? String.valueOf(task.getTaskDefId()) : "");
         hash.put("taskType", task.getTaskType() != null ? task.getTaskType() : "");
@@ -281,6 +282,7 @@ public class TaskCacheOperator {
      */
     private TaskInstance hashToTask(Map<Object, Object> hash) {
         return TaskInstance.builder()
+                .id(getLong(hash, "id"))
                 .taskId(getString(hash, "taskId"))
                 .taskDefId(getLong(hash, "taskDefId"))
                 .taskType(getString(hash, "taskType"))

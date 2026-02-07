@@ -19,7 +19,6 @@ import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import com.lite.task.infrastructure.redis.TaskQueueOperator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -103,28 +102,28 @@ public class TaskProducer {
                 .updatedAt(now)
                 .build();
 
-        // 5. Save to Redis Hash (primary storage)
-        taskCacheOperator.save(task);
+        // 5. Persist to database first to ensure task identity and status consistency
+        TaskInstance persistedTask = taskInstanceRepository.save(task);
 
-        // 6. Submit to queue or delay queue
+        // 6. Save to Redis Hash (primary storage)
+        taskCacheOperator.save(persistedTask);
+
+        // 7. Submit to queue or delay queue
         if (executeAt != null && executeAt.isAfter(LocalDateTime.now())) {
             // Delayed task - add to delay queue
-            delayQueueOperator.add(taskId, executeAt);
+            delayQueueOperator.add(persistedTask.getTaskId(), executeAt);
             log.info("Task submitted to delay queue: taskId={}, executeAt={}", taskId, executeAt);
         } else {
             // Immediate task - add to priority queue
-            taskQueueOperator.push(taskId, taskPriority);
+            taskQueueOperator.push(persistedTask.getTaskId(), taskPriority);
             log.info("Task submitted to queue: taskId={}, priority={}", taskId, taskPriority);
         }
-
-        // 7. Async persist to database (for record keeping)
-        asyncPersistTask(task);
 
         // 8. Publish event
         TaskCreatedEvent event = new TaskCreatedEvent(taskId, taskType, priority, params, createdBy);
         eventProducer.publishTaskCreated(event);
 
-        return task;
+        return persistedTask;
     }
 
     /**
@@ -187,9 +186,9 @@ public class TaskProducer {
         // Update Redis status
         taskCacheOperator.updateStatus(taskId, TaskStatus.CANCELLED);
 
-        // Async update database
+        // Update database
         task.cancel();
-        asyncPersistTask(task);
+        taskInstanceRepository.save(task);
 
         // Remove deduplication mark so task can be resubmitted
         if (task.getParams() != null) {
@@ -200,19 +199,4 @@ public class TaskProducer {
         return true;
     }
 
-    /**
-     * Async persist task to database (for record keeping)
-     * DB write failure does NOT affect task execution
-     */
-    @Async
-    public void asyncPersistTask(TaskInstance task) {
-        try {
-            taskInstanceRepository.save(task);
-            log.debug("Task persisted to database: taskId={}", task.getTaskId());
-        } catch (Exception e) {
-            log.error("Failed to persist task to database (non-blocking): taskId={}, error={}",
-                    task.getTaskId(), e.getMessage());
-            // DB write failure is non-blocking, task continues in Redis
-        }
-    }
 }
