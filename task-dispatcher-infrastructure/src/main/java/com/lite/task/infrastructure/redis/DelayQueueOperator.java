@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -28,8 +29,20 @@ import java.util.stream.Collectors;
 public class DelayQueueOperator {
 
     private final StringRedisTemplate redisTemplate;
+    private final DefaultRedisScript<List> pollReadyScript = buildPollReadyScript();
 
     private static final String DELAY_QUEUE_KEY = "task:delay:queue";
+    private static final String POLL_READY_LUA_SCRIPT = """
+            local key = KEYS[1]
+            local now = tonumber(ARGV[1])
+            local limit = tonumber(ARGV[2])
+
+            local tasks = redis.call('ZRANGEBYSCORE', key, '-inf', now, 'LIMIT', 0, limit)
+            if #tasks > 0 then
+                redis.call('ZREM', key, unpack(tasks))
+            end
+            return tasks
+            """;
 
     /**
      * Add task to delay queue
@@ -63,22 +76,20 @@ public class DelayQueueOperator {
      */
     public List<String> pollReady(int limit) {
         long now = System.currentTimeMillis();
-
-        // Get tasks with score <= now
-        Set<ZSetOperations.TypedTuple<String>> tasks = redisTemplate.opsForZSet()
-                .rangeByScoreWithScores(DELAY_QUEUE_KEY, 0, now, 0, limit);
-
-        if (tasks == null || tasks.isEmpty()) {
+        if (limit <= 0) {
             return Collections.emptyList();
         }
 
-        // Extract task IDs
-        List<String> taskIds = tasks.stream()
-                .map(ZSetOperations.TypedTuple::getValue)
-                .collect(Collectors.toList());
-
-        // Remove polled tasks
-        redisTemplate.opsForZSet().remove(DELAY_QUEUE_KEY, taskIds.toArray());
+        @SuppressWarnings("unchecked")
+        List<String> taskIds = (List<String>) redisTemplate.execute(
+                pollReadyScript,
+                Collections.singletonList(DELAY_QUEUE_KEY),
+                String.valueOf(now),
+                String.valueOf(limit)
+        );
+        if (taskIds == null || taskIds.isEmpty()) {
+            return Collections.emptyList();
+        }
 
         log.debug("Polled {} ready tasks from delay queue", taskIds.size());
         return taskIds;
@@ -187,5 +198,12 @@ public class DelayQueueOperator {
     public boolean exists(String taskId) {
         Double score = redisTemplate.opsForZSet().score(DELAY_QUEUE_KEY, taskId);
         return score != null;
+    }
+
+    private DefaultRedisScript<List> buildPollReadyScript() {
+        DefaultRedisScript<List> script = new DefaultRedisScript<>();
+        script.setScriptText(POLL_READY_LUA_SCRIPT);
+        script.setResultType(List.class);
+        return script;
     }
 }

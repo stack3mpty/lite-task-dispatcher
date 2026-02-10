@@ -65,6 +65,17 @@ task:
     executor-id: ${HOSTNAME:localhost}
     poll-interval-ms: 1000
     batch-size: 10
+  outbox:
+    enabled: true
+    scan-interval-ms: 2000
+    batch-size: 100
+    max-retries: 10
+    base-retry-delay-ms: 2000
+  scheduler:
+    timeout:
+      enabled: true
+      interval-ms: 5000
+      batch-size: 200
 
 # Actuator Configuration
 management:

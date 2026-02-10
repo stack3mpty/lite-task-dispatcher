@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS task_execution_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Task Outbox Event Table (reliable dispatch)
+CREATE TABLE IF NOT EXISTS task_outbox_event (
+    id BIGSERIAL PRIMARY KEY,
+    event_type VARCHAR(64) NOT NULL,
+    task_id VARCHAR(32) NOT NULL UNIQUE,
+    payload JSONB DEFAULT '{}',
+    status VARCHAR(16) NOT NULL DEFAULT 'NEW',
+    retry_count INT NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_task_def_type ON task_definition(task_type);
 CREATE INDEX IF NOT EXISTS idx_task_def_status ON task_definition(status);
@@ -66,6 +80,8 @@ CREATE INDEX IF NOT EXISTS idx_task_instance_def_status ON task_instance(task_de
 
 CREATE INDEX IF NOT EXISTS idx_task_log_instance_id ON task_execution_log(task_instance_id);
 CREATE INDEX IF NOT EXISTS idx_task_log_created_at ON task_execution_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_task_outbox_status_next_retry ON task_outbox_event(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_task_outbox_task_id ON task_outbox_event(task_id);
 
 -- Insert sample task definitions
 INSERT INTO task_definition (task_type, task_name, executor_type, description) VALUES
@@ -92,5 +108,11 @@ CREATE TRIGGER update_task_definition_updated_at
 DROP TRIGGER IF EXISTS update_task_instance_updated_at ON task_instance;
 CREATE TRIGGER update_task_instance_updated_at
     BEFORE UPDATE ON task_instance
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_task_outbox_event_updated_at ON task_outbox_event;
+CREATE TRIGGER update_task_outbox_event_updated_at
+    BEFORE UPDATE ON task_outbox_event
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();

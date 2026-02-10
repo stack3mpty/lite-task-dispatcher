@@ -7,7 +7,9 @@ import com.lite.task.common.enums.TaskStatus;
 import com.lite.task.common.model.PageResult;
 import com.lite.task.common.model.Result;
 import com.lite.task.core.producer.TaskProducer;
+import com.lite.task.domain.task.entity.TaskExecutionLog;
 import com.lite.task.domain.task.entity.TaskInstance;
+import com.lite.task.infrastructure.persistence.repository.TaskExecutionLogRepository;
 import com.lite.task.infrastructure.persistence.repository.TaskInstanceRepository;
 import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import com.lite.task.infrastructure.redis.TaskQueueOperator;
@@ -37,6 +39,7 @@ public class TaskController {
 
     private final TaskProducer taskProducer;
     private final TaskInstanceRepository taskInstanceRepository;
+    private final TaskExecutionLogRepository taskExecutionLogRepository;
     private final TaskCacheOperator taskCacheOperator;
     private final TaskQueueOperator taskQueueOperator;
 
@@ -67,16 +70,16 @@ public class TaskController {
     @GetMapping("/{taskId}")
     @Operation(summary = "Get task by ID")
     public Result<TaskResponse> getById(@PathVariable String taskId) {
-        // Try Redis first (primary storage for active tasks)
-        TaskInstance task = taskCacheOperator.get(taskId);
-
-        // Fallback to DB for historical tasks
-        if (task == null) {
-            task = taskInstanceRepository.findByTaskId(taskId).orElse(null);
-        }
+        TaskInstance cacheTask = taskCacheOperator.get(taskId);
+        TaskInstance dbTask = taskInstanceRepository.findByTaskId(taskId).orElse(null);
+        TaskInstance task = mergeForRead(cacheTask, dbTask);
 
         if (task == null) {
             return Result.failure(10001, "Task not found: " + taskId);
+        }
+
+        if (task.getResult() == null) {
+            task.setResult(getLatestResult(taskId));
         }
 
         return Result.success(toResponse(task));
@@ -194,5 +197,47 @@ public class TaskController {
                 .updatedAt(task.getUpdatedAt())
                 .durationMs(task.getDurationMs())
                 .build();
+    }
+
+    private TaskInstance mergeForRead(TaskInstance cacheTask, TaskInstance dbTask) {
+        if (cacheTask == null) {
+            return dbTask;
+        }
+        if (dbTask == null) {
+            return cacheTask;
+        }
+
+        // Redis does not persist result payload, DB is source of truth for terminal tasks.
+        if (cacheTask.getStatus() != null && cacheTask.getStatus().isTerminal()) {
+            return dbTask;
+        }
+
+        if (cacheTask.getResult() == null) {
+            cacheTask.setResult(dbTask.getResult());
+        }
+        if (isBlank(cacheTask.getErrorMessage()) && !isBlank(dbTask.getErrorMessage())) {
+            cacheTask.setErrorMessage(dbTask.getErrorMessage());
+        }
+        if (cacheTask.getStartedAt() == null) {
+            cacheTask.setStartedAt(dbTask.getStartedAt());
+        }
+        if (cacheTask.getFinishedAt() == null) {
+            cacheTask.setFinishedAt(dbTask.getFinishedAt());
+        }
+        return cacheTask;
+    }
+
+    private java.util.Map<String, Object> getLatestResult(String taskId) {
+        java.util.List<TaskExecutionLog> latestLogs = taskExecutionLogRepository.findLatestByTaskId(
+                taskId, PageRequest.of(0, 1)
+        );
+        if (latestLogs == null || latestLogs.isEmpty()) {
+            return null;
+        }
+        return latestLogs.get(0).getResult();
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 }

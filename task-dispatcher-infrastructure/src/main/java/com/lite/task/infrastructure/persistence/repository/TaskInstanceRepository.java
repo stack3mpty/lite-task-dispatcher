@@ -10,6 +10,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -87,6 +88,7 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, Long
      * Update task status
      */
     @Modifying
+    @Transactional
     @Query("UPDATE TaskInstance t SET t.status = :status, t.updatedAt = :now WHERE t.taskId = :taskId")
     int updateStatus(@Param("taskId") String taskId, @Param("status") TaskStatus status, @Param("now") LocalDateTime now);
 
@@ -94,11 +96,23 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, Long
      * Update task status with CAS (optimistic lock)
      */
     @Modifying
+    @Transactional
     @Query("UPDATE TaskInstance t SET t.status = :newStatus, t.updatedAt = :now WHERE t.taskId = :taskId AND t.status = :expectedStatus")
     int updateStatusCas(@Param("taskId") String taskId,
                         @Param("expectedStatus") TaskStatus expectedStatus,
                         @Param("newStatus") TaskStatus newStatus,
                         @Param("now") LocalDateTime now);
+
+    /**
+     * Claim task for execution with DB CAS semantics.
+     */
+    @Modifying
+    @Transactional
+    @Query("UPDATE TaskInstance t SET t.status = 'RUNNING', t.startedAt = :startedAt, t.executorId = :executorId, t.updatedAt = :startedAt " +
+            "WHERE t.taskId = :taskId AND (t.status = 'PENDING' OR t.status = 'RETRYING')")
+    int claimForExecution(@Param("taskId") String taskId,
+                          @Param("executorId") String executorId,
+                          @Param("startedAt") LocalDateTime startedAt);
 
     /**
      * Count by status
@@ -144,6 +158,7 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, Long
      * Delete old completed tasks
      */
     @Modifying
+    @Transactional
     @Query("DELETE FROM TaskInstance t WHERE t.status IN ('SUCCESS', 'DEAD', 'CANCELLED') AND t.finishedAt < :before")
     int deleteOldCompletedTasks(@Param("before") LocalDateTime before);
 }

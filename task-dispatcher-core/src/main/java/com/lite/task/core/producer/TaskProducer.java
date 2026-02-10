@@ -8,10 +8,10 @@ import com.lite.task.common.util.Assert;
 import com.lite.task.common.util.IdGenerator;
 import com.lite.task.domain.task.entity.TaskDefinition;
 import com.lite.task.domain.task.entity.TaskInstance;
-import com.lite.task.domain.task.event.TaskCreatedEvent;
-import com.lite.task.infrastructure.kafka.producer.TaskEventProducer;
+import com.lite.task.domain.task.entity.TaskOutboxEvent;
 import com.lite.task.infrastructure.persistence.repository.TaskDefinitionRepository;
 import com.lite.task.infrastructure.persistence.repository.TaskInstanceRepository;
+import com.lite.task.infrastructure.persistence.repository.TaskOutboxEventRepository;
 import com.lite.task.infrastructure.redis.DeduplicationChecker;
 import com.lite.task.infrastructure.redis.DelayQueueOperator;
 import com.lite.task.infrastructure.redis.RateLimiter;
@@ -20,9 +20,13 @@ import com.lite.task.infrastructure.redis.TaskQueueOperator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -44,7 +48,8 @@ public class TaskProducer {
     private final TaskCacheOperator taskCacheOperator;
     private final RateLimiter rateLimiter;
     private final DeduplicationChecker deduplicationChecker;
-    private final TaskEventProducer eventProducer;
+    private final TaskOutboxEventRepository taskOutboxEventRepository;
+    private final TaskOutboxPublisher taskOutboxPublisher;
 
     /**
      * Submit a new task
@@ -57,6 +62,7 @@ public class TaskProducer {
      * @param createdBy   Creator identifier
      * @return Created task instance
      */
+    @Transactional(rollbackFor = Exception.class)
     public TaskInstance submit(String taskType, Map<String, Object> params,
                                int priority, LocalDateTime executeAt,
                                String callbackUrl, String createdBy) {
@@ -102,27 +108,27 @@ public class TaskProducer {
                 .updatedAt(now)
                 .build();
 
-        // 5. Persist to database first to ensure task identity and status consistency
+        // 5. Persist task and outbox intent in the same local transaction.
+        // External publishing to Redis/Kafka happens after commit via outbox.
         TaskInstance persistedTask = taskInstanceRepository.save(task);
+        TaskOutboxEvent outboxEvent = taskOutboxEventRepository.save(buildOutboxEvent(persistedTask));
 
-        // 6. Save to Redis Hash (primary storage)
-        taskCacheOperator.save(persistedTask);
-
-        // 7. Submit to queue or delay queue
-        if (executeAt != null && executeAt.isAfter(LocalDateTime.now())) {
-            // Delayed task - add to delay queue
-            delayQueueOperator.add(persistedTask.getTaskId(), executeAt);
-            log.info("Task submitted to delay queue: taskId={}, executeAt={}", taskId, executeAt);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    taskOutboxPublisher.publishAfterCommit(outboxEvent.getId());
+                }
+            });
         } else {
-            // Immediate task - add to priority queue
-            taskQueueOperator.push(persistedTask.getTaskId(), taskPriority);
-            log.info("Task submitted to queue: taskId={}, priority={}", taskId, taskPriority);
+            taskOutboxPublisher.publishAfterCommit(outboxEvent.getId());
         }
 
-        // 8. Publish event
-        TaskCreatedEvent event = new TaskCreatedEvent(taskId, taskType, priority, params, createdBy);
-        eventProducer.publishTaskCreated(event);
-
+        log.info("Task accepted: taskId={}, priority={}, delayed={}, outboxId={}",
+                taskId,
+                taskPriority,
+                executeAt != null && executeAt.isAfter(LocalDateTime.now()),
+                outboxEvent.getId());
         return persistedTask;
     }
 
@@ -197,6 +203,22 @@ public class TaskProducer {
 
         log.info("Task cancelled: taskId={}", taskId);
         return true;
+    }
+
+    private TaskOutboxEvent buildOutboxEvent(TaskInstance task) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("taskId", task.getTaskId());
+        payload.put("taskType", task.getTaskType());
+        payload.put("priority", task.getPriority());
+        payload.put("executeAt", task.getExecuteAt() != null ? task.getExecuteAt().toString() : null);
+        payload.put("createdBy", task.getCreatedBy());
+
+        return TaskOutboxEvent.builder()
+                .eventType(TaskOutboxEvent.EVENT_TASK_SUBMITTED)
+                .taskId(task.getTaskId())
+                .payload(payload)
+                .status(TaskOutboxEvent.STATUS_NEW)
+                .build();
     }
 
 }
