@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 @Data
 @Builder
@@ -17,6 +18,8 @@ public class TaskDefinitionResponse {
     private String taskType;
     private String taskName;
     private String executorType;
+    private Map<String, Object> executorConfig;
+    private Map<String, Object> retryPolicy;
     private String description;
     private Integer timeoutSeconds;
     private Integer rateLimit;

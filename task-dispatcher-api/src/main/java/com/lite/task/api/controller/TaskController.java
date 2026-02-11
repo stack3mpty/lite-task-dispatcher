@@ -4,6 +4,7 @@ import com.lite.task.api.dto.request.TaskSubmitRequest;
 import com.lite.task.api.dto.response.TaskResponse;
 import com.lite.task.common.enums.TaskPriority;
 import com.lite.task.common.enums.TaskStatus;
+import com.lite.task.common.exception.TaskException;
 import com.lite.task.common.model.PageResult;
 import com.lite.task.common.model.Result;
 import com.lite.task.core.producer.TaskProducer;
@@ -75,7 +76,7 @@ public class TaskController {
         TaskInstance task = mergeForRead(cacheTask, dbTask);
 
         if (task == null) {
-            return Result.failure(10001, "Task not found: " + taskId);
+            throw TaskException.notFound(taskId);
         }
 
         if (task.getResult() == null) {
@@ -155,11 +156,11 @@ public class TaskController {
         }
 
         if (task == null) {
-            return Result.failure(10001, "Task not found: " + taskId);
+            throw TaskException.notFound(taskId);
         }
 
         if (!task.getStatus().isRetryable()) {
-            return Result.failure(10003, "Task cannot be retried in current status: " + task.getStatus());
+            throw TaskException.invalidStatus(taskId, task.getStatus().getCode(), "FAILED");
         }
 
         // Schedule retry

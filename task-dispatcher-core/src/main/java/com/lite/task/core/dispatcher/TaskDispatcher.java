@@ -4,6 +4,7 @@ import com.lite.task.common.enums.TaskPriority;
 import com.lite.task.common.enums.TaskStatus;
 import com.lite.task.common.exception.ErrorCode;
 import com.lite.task.common.exception.TaskException;
+import com.lite.task.common.util.TraceIdHolder;
 import com.lite.task.core.executor.TaskExecutor;
 import com.lite.task.core.executor.TaskResult;
 import com.lite.task.core.executor.retry.ExponentialBackoffRetry;
@@ -22,6 +23,8 @@ import com.lite.task.infrastructure.redis.DelayQueueOperator;
 import com.lite.task.infrastructure.redis.DistributedLock;
 import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import com.lite.task.infrastructure.redis.TaskQueueOperator;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,6 +35,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Task Dispatcher Service
@@ -53,6 +57,7 @@ public class TaskDispatcher {
     private final DistributedLock distributedLock;
     private final TaskEventProducer eventProducer;
     private final TaskPersistenceAsyncService taskPersistenceAsyncService;
+    private final MeterRegistry meterRegistry;
     private final List<TaskExecutor> executors;
 
     private final Map<String, TaskExecutor> executorMap = new ConcurrentHashMap<>();
@@ -112,6 +117,9 @@ public class TaskDispatcher {
      * Execute a specific task
      */
     public boolean executeTask(String taskId) {
+        TraceIdHolder.bindTraceId(null);
+        TraceIdHolder.bindTaskId(taskId);
+
         // Acquire distributed lock to prevent duplicate execution
         String lockKey = "execute:" + taskId;
         if (!distributedLock.tryLockTask(lockKey, 300)) {
@@ -163,6 +171,7 @@ public class TaskDispatcher {
                     .maxAttempts(task.getMaxRetry())
                     .timeoutSeconds(definition.getTimeoutSeconds())
                     .callbackUrl(task.getCallbackUrl())
+                    .traceId(TraceIdHolder.getOrCreateTraceId())
                     .build();
 
             // Update Redis status to RUNNING
@@ -175,8 +184,10 @@ public class TaskDispatcher {
             taskQueueOperator.markRunning(taskId, executorId, definition.getTimeoutSeconds());
 
             // Publish started event
-            eventProducer.publishTaskStarted(new TaskStartedEvent(
-                    taskId, task.getTaskType(), executorId, context.getAttemptNumber()));
+            TaskStartedEvent startedEvent = new TaskStartedEvent(
+                    taskId, task.getTaskType(), executorId, context.getAttemptNumber());
+            startedEvent.setTraceId(context.getTraceId());
+            eventProducer.publishTaskStarted(startedEvent);
 
             // Execute
             long startTime = System.currentTimeMillis();
@@ -199,6 +210,8 @@ public class TaskDispatcher {
         } finally {
             distributedLock.unlockTask(lockKey);
             taskQueueOperator.clearRunning(taskId);
+            TraceIdHolder.clearTaskId();
+            TraceIdHolder.clearTraceId();
         }
     }
 
@@ -230,9 +243,14 @@ public class TaskDispatcher {
         taskPersistenceAsyncService.persistTask(task);
 
         // Publish event
-        eventProducer.publishTaskCompleted(new TaskCompletedEvent(
+        TaskCompletedEvent event = new TaskCompletedEvent(
                 task.getTaskId(), task.getTaskType(), result.getData(),
-                duration, executorId, attemptNumber));
+                duration, executorId, attemptNumber);
+        event.setTraceId(TraceIdHolder.getOrCreateTraceId());
+        eventProducer.publishTaskCompleted(event);
+
+        publishCallbackIfNeeded(task, task.getStatus().getCode(), resultData, null, attemptNumber);
+        recordExecutionMetrics(task.getTaskType(), "SUCCESS", duration);
 
         log.info("Task completed successfully: taskId={}, duration={}ms", task.getTaskId(), duration);
     }
@@ -278,9 +296,11 @@ public class TaskDispatcher {
                 delayQueueOperator.addWithDelay(task.getTaskId(), delay);
                 log.info("Task scheduled for retry: taskId={}, attempt={}, delay={}ms",
                         task.getTaskId(), task.getRetryCount(), delay);
+                meterRegistry.counter("task.retry.total", "taskType", safeTagValue(task.getTaskType())).increment();
             } else {
                 // Max retries exceeded, mark as DEAD
                 taskCacheOperator.updateOnFailure(task.getTaskId(), result.getMessage(), TaskStatus.DEAD);
+                meterRegistry.counter("task.dead.total", "taskType", safeTagValue(task.getTaskType())).increment();
             }
         } else {
             // Non-retryable failure
@@ -299,8 +319,13 @@ public class TaskDispatcher {
                                 result.getMessage(), result.getErrorDetail(), duration, executorId, attemptNumber) :
                         TaskFailedEvent.permanent(task.getTaskId(), task.getTaskType(),
                                 result.getMessage(), result.getErrorDetail(), duration, executorId, attemptNumber);
+        event.setTraceId(TraceIdHolder.getOrCreateTraceId());
 
         eventProducer.publishTaskFailed(event);
+        if (task.getStatus().isTerminal()) {
+            publishCallbackIfNeeded(task, task.getStatus().getCode(), null, result.getMessage(), attemptNumber);
+        }
+        recordExecutionMetrics(task.getTaskType(), task.getStatus().name(), duration);
 
         log.info("Task failed: taskId={}, willRetry={}, status={}",
                 task.getTaskId(), willRetry, task.getStatus());
@@ -350,6 +375,10 @@ public class TaskDispatcher {
         } catch (Exception ex) {
             log.error("Failed to sync execution error to DB: taskId={}, error={}", taskId, ex.getMessage(), ex);
         }
+
+        meterRegistry.counter("task.execution.total",
+                "taskType", "unknown",
+                "status", "FAILED").increment();
     }
 
     /**
@@ -372,5 +401,42 @@ public class TaskDispatcher {
         }
 
         taskInstanceRepository.findByTaskId(task.getTaskId()).ifPresent(existing -> task.setId(existing.getId()));
+    }
+
+    private void publishCallbackIfNeeded(TaskInstance task,
+                                         String status,
+                                         Map<String, Object> result,
+                                         String errorMessage,
+                                         int attemptNumber) {
+        if (task.getCallbackUrl() == null || task.getCallbackUrl().isBlank()) {
+            return;
+        }
+
+        Map<String, Object> callbackPayload = new ConcurrentHashMap<>();
+        callbackPayload.put("taskId", task.getTaskId());
+        callbackPayload.put("taskType", task.getTaskType());
+        callbackPayload.put("status", status);
+        callbackPayload.put("callbackUrl", task.getCallbackUrl());
+        callbackPayload.put("result", result);
+        callbackPayload.put("errorMessage", errorMessage);
+        callbackPayload.put("attemptNumber", attemptNumber);
+        callbackPayload.put("traceId", TraceIdHolder.getOrCreateTraceId());
+        callbackPayload.put("executorId", executorId);
+        eventProducer.publishCallback(task.getTaskId(), callbackPayload);
+    }
+
+    private void recordExecutionMetrics(String taskType, String status, long durationMs) {
+        String safeTaskType = safeTagValue(taskType);
+        String safeStatus = safeTagValue(status);
+        meterRegistry.counter("task.execution.total", "taskType", safeTaskType, "status", safeStatus).increment();
+        Timer.builder("task.execution.duration")
+                .description("Task execution duration")
+                .tags("taskType", safeTaskType, "status", safeStatus)
+                .register(meterRegistry)
+                .record(Math.max(durationMs, 0L), TimeUnit.MILLISECONDS);
+    }
+
+    private String safeTagValue(String value) {
+        return value == null || value.isBlank() ? "unknown" : value;
     }
 }

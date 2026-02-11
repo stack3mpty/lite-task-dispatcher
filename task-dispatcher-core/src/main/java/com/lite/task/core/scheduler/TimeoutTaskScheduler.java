@@ -1,6 +1,7 @@
 package com.lite.task.core.scheduler;
 
 import com.lite.task.common.enums.TaskStatus;
+import com.lite.task.common.util.TraceIdHolder;
 import com.lite.task.core.executor.retry.ExponentialBackoffRetry;
 import com.lite.task.core.executor.retry.RetryPolicy;
 import com.lite.task.domain.task.entity.TaskDefinition;
@@ -15,6 +16,7 @@ import com.lite.task.infrastructure.redis.DelayQueueOperator;
 import com.lite.task.infrastructure.redis.DistributedLock;
 import com.lite.task.infrastructure.redis.TaskCacheOperator;
 import com.lite.task.infrastructure.redis.TaskQueueOperator;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -44,6 +46,7 @@ public class TimeoutTaskScheduler {
     private final DelayQueueOperator delayQueueOperator;
     private final TaskEventProducer taskEventProducer;
     private final DistributedLock distributedLock;
+    private final MeterRegistry meterRegistry;
 
     @Value("${task.scheduler.timeout.enabled:true}")
     private boolean enabled;
@@ -83,6 +86,8 @@ public class TimeoutTaskScheduler {
     }
 
     private void handleTimeout(String taskId, int timeoutSeconds, LocalDateTime now, TaskDefinition definition) {
+        TraceIdHolder.bindTraceId(null);
+        TraceIdHolder.bindTaskId(taskId);
         String executeLockKey = "execute:" + taskId;
         if (!distributedLock.tryLockTask(executeLockKey, 30)) {
             return;
@@ -115,7 +120,7 @@ public class TimeoutTaskScheduler {
 
                 taskCacheOperator.updateRetry(taskId, task.getRetryCount(), TaskStatus.RETRYING);
                 delayQueueOperator.addWithDelay(taskId, delayMs);
-                taskEventProducer.publishTaskFailed(TaskFailedEvent.withRetry(
+                TaskFailedEvent retryEvent = TaskFailedEvent.withRetry(
                         task.getTaskId(),
                         task.getTaskType(),
                         timeoutMessage,
@@ -123,10 +128,12 @@ public class TimeoutTaskScheduler {
                         durationMs,
                         "timeout-scheduler",
                         attemptNumber
-                ));
+                );
+                retryEvent.setTraceId(TraceIdHolder.getOrCreateTraceId());
+                taskEventProducer.publishTaskFailed(retryEvent);
             } else {
                 taskCacheOperator.updateOnFailure(taskId, timeoutMessage, TaskStatus.DEAD);
-                taskEventProducer.publishTaskFailed(TaskFailedEvent.dead(
+                TaskFailedEvent deadEvent = TaskFailedEvent.dead(
                         task.getTaskId(),
                         task.getTaskType(),
                         timeoutMessage,
@@ -134,7 +141,9 @@ public class TimeoutTaskScheduler {
                         durationMs,
                         "timeout-scheduler",
                         attemptNumber
-                ));
+                );
+                deadEvent.setTraceId(TraceIdHolder.getOrCreateTraceId());
+                taskEventProducer.publishTaskFailed(deadEvent);
             }
 
             taskQueueOperator.clearRunning(taskId);
@@ -149,10 +158,17 @@ public class TimeoutTaskScheduler {
 
             log.warn("Timeout handled: taskId={}, status={}, retryCount={}",
                     taskId, task.getStatus(), task.getRetryCount());
+            meterRegistry.counter("task.timeout.total", "taskType", safeTagValue(task.getTaskType())).increment();
         } catch (Exception e) {
             log.error("Failed to handle timeout task: taskId={}, error={}", taskId, e.getMessage(), e);
         } finally {
             distributedLock.unlockTask(executeLockKey);
+            TraceIdHolder.clearTaskId();
+            TraceIdHolder.clearTraceId();
         }
+    }
+
+    private String safeTagValue(String value) {
+        return value == null || value.isBlank() ? "unknown" : value;
     }
 }

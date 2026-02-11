@@ -76,6 +76,20 @@ task:
       enabled: true
       interval-ms: 5000
       batch-size: 200
+    cleanup:
+      enabled: true
+      interval-ms: 3600000
+      retention-days:
+        task-instance: 30
+        execution-log: 30
+  kafka:
+    callback:
+      http-timeout-ms: 5000
+      replay:
+        enabled: true
+        max-attempts: 3
+        base-delay-ms: 1000
+        max-delay-ms: 60000
 
 # Actuator Configuration
 management:
@@ -94,6 +108,8 @@ logging:
     com.lite.task: DEBUG
     org.springframework.kafka: WARN
     org.apache.kafka: WARN
+  pattern:
+    level: "%5p [traceId:%X{traceId:-}] [taskId:%X{taskId:-}]"
 
 # SpringDoc OpenAPI Configuration
 springdoc:
