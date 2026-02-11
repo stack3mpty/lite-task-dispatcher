@@ -3,6 +3,7 @@ package com.lite.task.infrastructure.kafka.producer;
 import com.lite.task.common.util.JsonUtils;
 import com.lite.task.domain.task.event.*;
 import com.lite.task.infrastructure.kafka.config.KafkaConfig;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -24,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 public class TaskEventProducer {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final MeterRegistry meterRegistry;
 
     /**
      * Publish task created event
@@ -78,8 +80,24 @@ public class TaskEventProducer {
      * Publish to dead letter queue
      */
     public void publishToDlq(String taskId, Object message, String reason) {
-        DlqMessage dlqMessage = new DlqMessage(taskId, message, reason);
+        publishToDlq(taskId, message, reason, "unknown");
+    }
+
+    /**
+     * Publish to dead letter queue with source topic metadata.
+     */
+    public void publishToDlq(String taskId, Object message, String reason, String sourceTopic) {
+        int replayCount = extractReplayCount(message);
+        DlqMessage dlqMessage = new DlqMessage(
+                taskId,
+                message,
+                reason,
+                sourceTopic,
+                replayCount,
+                System.currentTimeMillis()
+        );
         publish(KafkaConfig.TOPIC_TASK_DLQ, taskId, dlqMessage);
+        meterRegistry.counter("task.dlq.total", "sourceTopic", safeTagValue(sourceTopic)).increment();
     }
 
     /**
@@ -123,5 +141,26 @@ public class TaskEventProducer {
     /**
      * Dead Letter Queue message wrapper
      */
-    private record DlqMessage(String taskId, Object originalMessage, String reason) {}
+    private int extractReplayCount(Object message) {
+        if (!(message instanceof java.util.Map<?, ?> map)) {
+            return 0;
+        }
+        Object replay = map.get("dlqReplayCount");
+        if (replay instanceof Number number) {
+            return number.intValue();
+        }
+        return 0;
+    }
+
+    private String safeTagValue(String value) {
+        return value == null || value.isBlank() ? "unknown" : value;
+    }
+
+    private record DlqMessage(String taskId,
+                              Object originalMessage,
+                              String reason,
+                              String sourceTopic,
+                              int replayCount,
+                              long timestamp) {
+    }
 }

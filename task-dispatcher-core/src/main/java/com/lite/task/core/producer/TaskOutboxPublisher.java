@@ -2,6 +2,7 @@ package com.lite.task.core.producer;
 
 import com.lite.task.common.enums.TaskPriority;
 import com.lite.task.common.enums.TaskStatus;
+import com.lite.task.common.util.TraceIdHolder;
 import com.lite.task.domain.task.entity.TaskInstance;
 import com.lite.task.domain.task.entity.TaskOutboxEvent;
 import com.lite.task.domain.task.event.TaskCreatedEvent;
@@ -106,6 +107,8 @@ public class TaskOutboxPublisher {
     }
 
     private void doPublish(TaskOutboxEvent outboxEvent) {
+        TraceIdHolder.bindTraceId(null);
+        TraceIdHolder.bindTaskId(outboxEvent.getTaskId());
         try {
             TaskInstance task = taskInstanceRepository.findByTaskId(outboxEvent.getTaskId()).orElse(null);
             if (task == null) {
@@ -154,6 +157,9 @@ public class TaskOutboxPublisher {
                     outboxEvent.getRetryCount(),
                     e.getMessage(),
                     e);
+        } finally {
+            TraceIdHolder.clearTaskId();
+            TraceIdHolder.clearTraceId();
         }
     }
 }
