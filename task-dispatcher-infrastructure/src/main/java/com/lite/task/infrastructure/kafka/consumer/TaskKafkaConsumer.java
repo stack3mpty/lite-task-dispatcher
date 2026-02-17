@@ -71,16 +71,27 @@ public class TaskKafkaConsumer {
         TraceIdHolder.bindTraceId(traceId);
         TraceIdHolder.bindTaskId(taskId);
 
+        boolean ack = false;
         try {
             processCallback(taskId, payload);
             meterRegistry.counter("task.callback.consume.total", "status", "success").increment();
             log.info("Consumed callback event successfully: taskId={}, offset={}", taskId, record.offset());
+            ack = true;
         } catch (Exception e) {
             meterRegistry.counter("task.callback.consume.total", "status", "failed").increment();
-            taskEventProducer.publishToDlq(taskId, payload, e.getMessage(), KafkaConfig.TOPIC_TASK_CALLBACK);
-            log.warn("Callback consume failed and sent to DLQ: taskId={}, error={}", taskId, e.getMessage());
+            try {
+                taskEventProducer.publishToDlqSync(taskId, payload, e.getMessage(), KafkaConfig.TOPIC_TASK_CALLBACK);
+                log.warn("Callback consume failed and sent to DLQ: taskId={}, error={}", taskId, e.getMessage());
+                ack = true;
+            } catch (Exception dlqError) {
+                log.error("Callback consume failed and DLQ publish failed, will retry by Kafka: taskId={}, error={}",
+                        taskId, dlqError.getMessage(), dlqError);
+                throw dlqError;
+            }
         } finally {
-            acknowledgment.acknowledge();
+            if (ack) {
+                acknowledgment.acknowledge();
+            }
             TraceIdHolder.clearTaskId();
             TraceIdHolder.clearTraceId();
         }
@@ -98,8 +109,8 @@ public class TaskKafkaConsumer {
 
         try {
             handleDlqMessage(taskId, dlqPayload);
-        } finally {
             acknowledgment.acknowledge();
+        } finally {
             TraceIdHolder.clearTaskId();
             TraceIdHolder.clearTraceId();
         }

@@ -1,6 +1,8 @@
 package com.lite.task.api.controller;
 
 import com.lite.task.api.dto.response.DashboardStatsResponse;
+import com.lite.task.api.dto.response.ObservabilitySnapshotResponse;
+import com.lite.task.api.service.ObservabilityService;
 import com.lite.task.common.enums.TaskPriority;
 import com.lite.task.common.enums.TaskStatus;
 import com.lite.task.common.model.Result;
@@ -33,6 +35,7 @@ public class StatsController {
 
     private final TaskInstanceRepository taskInstanceRepository;
     private final TaskQueueOperator taskQueueOperator;
+    private final ObservabilityService observabilityService;
 
     /**
      * Get dashboard statistics
@@ -67,5 +70,11 @@ public class StatsController {
                 .build();
 
         return Result.success(stats);
+    }
+
+    @GetMapping("/observability")
+    @Operation(summary = "Get observability snapshot")
+    public Result<ObservabilitySnapshotResponse> getObservabilitySnapshot() {
+        return Result.success(observabilityService.snapshot());
     }
 }
