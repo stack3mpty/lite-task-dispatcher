@@ -30,10 +30,19 @@ public class TaskMetricsCollector {
                     .description("Queue length by priority")
                     .tag("priority", priority.name())
                     .register(meterRegistry);
+
+            Gauge.builder("task.queue.processing.length", taskQueueOperator, operator -> operator.processingSize(priority))
+                    .description("Processing queue length by priority")
+                    .tag("priority", priority.name())
+                    .register(meterRegistry);
         }
 
         Gauge.builder("task.queue.total.length", taskQueueOperator, TaskQueueOperator::totalSize)
                 .description("Total queue backlog across all priorities")
+                .register(meterRegistry);
+
+        Gauge.builder("task.queue.processing.total.length", taskQueueOperator, TaskQueueOperator::totalProcessingSize)
+                .description("Total processing queue size across all priorities")
                 .register(meterRegistry);
 
         Gauge.builder("task.delay.queue.length", delayQueueOperator, DelayQueueOperator::size)

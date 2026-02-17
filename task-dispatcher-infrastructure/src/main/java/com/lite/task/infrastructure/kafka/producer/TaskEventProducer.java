@@ -101,6 +101,24 @@ public class TaskEventProducer {
     }
 
     /**
+     * Publish to dead letter queue synchronously.
+     * Throws exception if Kafka send fails.
+     */
+    public void publishToDlqSync(String taskId, Object message, String reason, String sourceTopic) {
+        int replayCount = extractReplayCount(message);
+        DlqMessage dlqMessage = new DlqMessage(
+                taskId,
+                message,
+                reason,
+                sourceTopic,
+                replayCount,
+                System.currentTimeMillis()
+        );
+        publishSync(KafkaConfig.TOPIC_TASK_DLQ, taskId, dlqMessage);
+        meterRegistry.counter("task.dlq.total", "sourceTopic", safeTagValue(sourceTopic)).increment();
+    }
+
+    /**
      * Generic publish method
      */
     private void publish(String topic, String key, Object message) {

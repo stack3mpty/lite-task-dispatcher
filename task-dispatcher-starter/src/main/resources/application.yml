@@ -1,5 +1,8 @@
 server:
   port: 8080
+  tomcat:
+    mbeanregistry:
+      enabled: true
 
 spring:
   application:
@@ -65,6 +68,7 @@ task:
     executor-id: ${HOSTNAME:localhost}
     poll-interval-ms: 1000
     batch-size: 10
+    visibility-timeout-seconds: 300
   outbox:
     enabled: true
     scan-interval-ms: 2000
@@ -75,6 +79,10 @@ task:
     timeout:
       enabled: true
       interval-ms: 5000
+      batch-size: 200
+    queue-recovery:
+      enabled: true
+      interval-ms: 1000
       batch-size: 200
     cleanup:
       enabled: true
@@ -90,6 +98,12 @@ task:
         max-attempts: 3
         base-delay-ms: 1000
         max-delay-ms: 60000
+  observability:
+    trace:
+      max-records: 500
+      query-limit: 30
+    endpoint-metrics:
+      limit: 20
 
 # Actuator Configuration
 management:
@@ -100,6 +114,20 @@ management:
   endpoint:
     health:
       show-details: always
+  metrics:
+    distribution:
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+        api.request.duration: 0.5,0.95,0.99
+        api.request.duration.endpoint: 0.5,0.95,0.99
+        task.execution.duration: 0.5,0.95,0.99
+        task.execution.duration.all: 0.5,0.95,0.99
+      percentiles-histogram:
+        http.server.requests: true
+        api.request.duration: true
+        api.request.duration.endpoint: true
+        task.execution.duration: true
+        task.execution.duration.all: true
 
 # Logging Configuration
 logging:

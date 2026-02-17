@@ -65,6 +65,9 @@ public class TaskDispatcher {
     @Value("${task.dispatcher.executor-id:#{T(java.util.UUID).randomUUID().toString()}}")
     private String executorId;
 
+    @Value("${task.dispatcher.visibility-timeout-seconds:300}")
+    private int visibilityTimeoutSeconds;
+
     private String executorIp;
 
     /**
@@ -92,31 +95,40 @@ public class TaskDispatcher {
      * @return true if a task was executed
      */
     public boolean pollAndExecute() {
-        // Try to get task from priority queues
-        String taskId = taskQueueOperator.popByPriority();
-        if (taskId == null) {
+        TaskQueueOperator.ReservedTask reservedTask =
+                taskQueueOperator.reserveByPriority(executorId, visibilityTimeoutSeconds);
+        if (reservedTask == null) {
             return false;
         }
 
-        return executeTask(taskId);
+        QueueDecision decision = executeTaskWithQueueDecision(reservedTask.taskId());
+        finalizeReservation(reservedTask.taskId(), decision);
+        return true;
     }
 
     /**
      * Poll and execute next task with specific priority
      */
     public boolean pollAndExecute(TaskPriority priority) {
-        String taskId = taskQueueOperator.pop(priority);
-        if (taskId == null) {
+        TaskQueueOperator.ReservedTask reservedTask =
+                taskQueueOperator.reserve(priority, executorId, visibilityTimeoutSeconds);
+        if (reservedTask == null) {
             return false;
         }
 
-        return executeTask(taskId);
+        QueueDecision decision = executeTaskWithQueueDecision(reservedTask.taskId());
+        finalizeReservation(reservedTask.taskId(), decision);
+        return true;
     }
 
     /**
      * Execute a specific task
      */
     public boolean executeTask(String taskId) {
+        return executeTaskWithQueueDecision(taskId) == QueueDecision.ACK;
+    }
+
+    private QueueDecision executeTaskWithQueueDecision(String taskId) {
         TraceIdHolder.bindTraceId(null);
         TraceIdHolder.bindTaskId(taskId);
 
@@ -124,7 +136,9 @@ public class TaskDispatcher {
         String lockKey = "execute:" + taskId;
         if (!distributedLock.tryLockTask(lockKey, 300)) {
             log.warn("Failed to acquire lock for task: {}", lockKey);
-            return false;
+            TraceIdHolder.clearTaskId();
+            TraceIdHolder.clearTraceId();
+            return QueueDecision.REQUEUE;
         }
 
         try {
@@ -133,20 +147,20 @@ public class TaskDispatcher {
 
             if (task == null) {
                 log.warn("Task not found in cache: {}", taskId);
-                return false;
+                return QueueDecision.REQUEUE;
             }
 
             // Check status
             if (task.getStatus() != TaskStatus.PENDING && task.getStatus() != TaskStatus.RETRYING) {
                 log.warn("Task not in executable status: taskId={}, status={}", taskId, task.getStatus());
-                return false;
+                return QueueDecision.ACK;
             }
 
             LocalDateTime dbStartTime = LocalDateTime.now();
             int claimed = taskInstanceRepository.claimForExecution(taskId, executorId, dbStartTime);
             if (claimed <= 0) {
                 log.warn("Task claim failed, skip execution: taskId={}", taskId);
-                return false;
+                return QueueDecision.ACK;
             }
 
             // Load task definition
@@ -201,17 +215,34 @@ public class TaskDispatcher {
                 handleFailure(task, definition, result, duration, context.getAttemptNumber());
             }
 
-            return true;
+            return QueueDecision.ACK;
 
         } catch (Exception e) {
             log.error("Error executing task: taskId={}, error={}", taskId, e.getMessage(), e);
             handleExecutionError(taskId, e);
-            return false;
+            return QueueDecision.ACK;
         } finally {
             distributedLock.unlockTask(lockKey);
             taskQueueOperator.clearRunning(taskId);
             TraceIdHolder.clearTaskId();
             TraceIdHolder.clearTraceId();
+        }
+    }
+
+    private void finalizeReservation(String taskId, QueueDecision decision) {
+        try {
+            if (decision == QueueDecision.REQUEUE) {
+                boolean requeued = taskQueueOperator.requeueReservation(taskId);
+                if (!requeued) {
+                    log.warn("Failed to requeue reservation, fallback to ack: taskId={}", taskId);
+                    taskQueueOperator.ackReservation(taskId);
+                }
+                return;
+            }
+            taskQueueOperator.ackReservation(taskId);
+        } catch (Exception e) {
+            log.error("Failed to finalize queue reservation: taskId={}, decision={}, error={}",
+                    taskId, decision, e.getMessage(), e);
         }
     }
 
@@ -428,15 +459,25 @@ public class TaskDispatcher {
     private void recordExecutionMetrics(String taskType, String status, long durationMs) {
         String safeTaskType = safeTagValue(taskType);
         String safeStatus = safeTagValue(status);
+        long safeDuration = Math.max(durationMs, 0L);
         meterRegistry.counter("task.execution.total", "taskType", safeTaskType, "status", safeStatus).increment();
         Timer.builder("task.execution.duration")
                 .description("Task execution duration")
                 .tags("taskType", safeTaskType, "status", safeStatus)
                 .register(meterRegistry)
-                .record(Math.max(durationMs, 0L), TimeUnit.MILLISECONDS);
+                .record(safeDuration, TimeUnit.MILLISECONDS);
+        Timer.builder("task.execution.duration.all")
+                .description("Task execution duration across all task types")
+                .register(meterRegistry)
+                .record(safeDuration, TimeUnit.MILLISECONDS);
     }
 
     private String safeTagValue(String value) {
         return value == null || value.isBlank() ? "unknown" : value;
+    }
+
+    private enum QueueDecision {
+        ACK,
+        REQUEUE
     }
 }
