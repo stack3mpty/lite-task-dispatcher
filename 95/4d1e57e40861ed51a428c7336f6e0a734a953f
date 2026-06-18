@@ -1,0 +1,37 @@
+.github/ISSUE_TEMPLATE/bug_report.md
+  s_1c521e4f5d8655::t_886dc98ac11220 1-38
+.github/ISSUE_TEMPLATE/feature_request.md
+  s_1c521e4f5d8655::t_638eb02b57af3c 1-23
+Makefile
+  s_1c521e4f5d8655::t_3455dc9c2e3b59 1-31
+README.md
+  s_1c521e4f5d8655::t_4ac4782bb39ec2 47
+  s_1c521e4f5d8655::t_637a3a5352e3fa 198
+  s_1c521e4f5d8655::t_f10b1a083afbb6 3-29
+  s_1c521e4f5d8655::t_52d8c6d13d7ce5 83-84,90-91,97-98
+  s_1c521e4f5d8655::t_3c1117e4ec9d14 76
+CONTRIBUTING.md
+  s_1c521e4f5d8655::t_854f5a55ab4bd8 1-52
+LICENSE
+  s_1c521e4f5d8655::t_0be72e76e7eeaf 1-21
+.github/workflows/ci.yml
+  s_1c521e4f5d8655::t_77b9378f967db7 1-57
+CHANGELOG.md
+  s_1c521e4f5d8655::t_496ed913352d65 1-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.17-trip",
+  "base_commit_sha": "954d1e57e40861ed51a428c7336f6e0a734a953f",
+  "prompts": {},
+  "sessions": {
+    "s_1c521e4f5d8655": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "695c03f3-ea74-452d-b2b7-f90f9d817f78",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "c.kai <c.kai@trip.com>"
+    }
+  }
+}
