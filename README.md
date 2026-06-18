@@ -1,6 +1,32 @@
 # lite-task-dispatcher
 
-A lightweight distributed task scheduling and processing platform built with Spring Boot 3, PostgreSQL, Redis, and Kafka.
+[![CI](https://github.com/stack3mpty/lite-task-dispatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/stack3mpty/lite-task-dispatcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Java 21](https://img.shields.io/badge/Java-21-blue.svg)](https://openjdk.org/projects/jdk/21/)
+
+A lightweight distributed task scheduling and execution engine. No ZooKeeper, no dedicated admin node, no heavy cluster protocol. Just Redis + PostgreSQL + Kafka, production-ready out of the box.
+
+**Why another task dispatcher?**
+
+| | XXL-Job | PowerJob | lite-task-dispatcher |
+|---|---------|----------|---------------------|
+| Admin node | Required | Required (Akka cluster) | None |
+| Coordination | DB polling | Akka | Redis + distributed lock |
+| Priority queue | No | No | P0-P4, 5 levels |
+| Rate limiting | No | No | Token bucket (Lua) |
+| Deduplication | No | No | MD5 parameter hashing |
+| Infra dependencies | MySQL + Admin App | MySQL + Worker + Server | Redis + PostgreSQL |
+
+Best suited for: mid-scale systems that need reliable task dispatch without operational overhead of a dedicated scheduler cluster.
+
+### Benchmark (dual-node, 2026-02-07)
+
+```
+5000 tasks @ 200 RPS
+Submit latency: p50=5ms, p95=22ms, p99=44ms
+Execution: 100% success, zero pending stuck
+HA: single node down mid-test, zero task loss
+```
 
 ## Features
 
@@ -18,6 +44,7 @@ A lightweight distributed task scheduling and processing platform built with Spr
 
 | Component | Technology |
 |-----------|------------|
+| Language | Java 21 |
 | Framework | Spring Boot 3.2 |
 | Database | PostgreSQL 15 |
 | Cache/Queue | Redis 7 |
@@ -46,27 +73,29 @@ A lightweight distributed task scheduling and processing platform built with Spr
 
 ### Prerequisites
 
-- JDK 17+
+- JDK 21+
 - Maven 3.8+
 - Docker & Docker Compose
 
 ### 1. Start Infrastructure
 
 ```bash
-# Start PostgreSQL, Redis, Kafka
-docker-compose up -d
+make infra
+# or: docker-compose up -d
 ```
 
 ### 2. Build Project
 
 ```bash
-mvn clean package -DskipTests
+make build
+# or: mvn clean package -DskipTests
 ```
 
 ### 3. Run Application
 
 ```bash
-java -jar task-dispatcher-starter/target/task-dispatcher-starter-1.0.0-SNAPSHOT.jar
+make run
+# or: java -jar task-dispatcher-starter/target/task-dispatcher-starter-1.0.0-SNAPSHOT.jar
 ```
 
 ### 4. Access API
@@ -166,4 +195,4 @@ task:
 
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE) for details.
